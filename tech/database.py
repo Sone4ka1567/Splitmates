@@ -1,11 +1,15 @@
 import datetime
 import sqlite3
 
+from .exchange_rates_api import get_exchange_rate
+
 
 class Database():
     def __init__(self):
         self.connection = sqlite3.connect("database.db")
         self.cursor = self.connection.cursor()
+
+        self.epsilon = 0.001
 
     def start(self):
         self.cursor.execute(
@@ -61,37 +65,41 @@ class Database():
         self.cursor.execute("SELECT user_id, username FROM users WHERE chat_id = ?", (chat_id,))
         return self.cursor.fetchall()
 
-    def update_or_add_debt(self, creditor_id, debtor_id, amount, currency, description, chat_id):
+    async def update_or_add_debt(self, creditor_id, debtor_id, amount, currency, description, chat_id):
         if creditor_id == debtor_id:
             return
 
         self.cursor.execute("""
-            SELECT amount, debt_id, creditor_id FROM debts 
+            SELECT amount, debt_id, creditor_id, currency FROM debts 
             WHERE ((creditor_id = ? AND debtor_id = ?) OR (creditor_id = ? AND debtor_id = ?))
-            AND currency = ? AND chat_id = ?
-            """, (creditor_id, debtor_id, debtor_id, creditor_id, currency, chat_id))
+            AND chat_id = ?
+            """, (creditor_id, debtor_id, debtor_id, creditor_id, chat_id))
         result = self.cursor.fetchone()
 
         if result:
-            current_amount, debt_id, current_creditor_id = result
+            current_amount, debt_id, current_creditor_id, current_currency = result
+            if current_currency != currency:
+                amount = await get_exchange_rate(currency, current_currency, amount, str(datetime.datetime.now(tz=datetime.timezone.utc)))
+                currency = current_currency
+
             if creditor_id == current_creditor_id:
                 new_amount = current_amount + amount
             else:
                 new_amount = current_amount - amount
-            
-            if new_amount > 0:
-                self.cursor.execute("UPDATE debts SET amount = ? WHERE debt_id = ?", (new_amount, debt_id))
-            elif new_amount < 0:
-                # Если новая сумма отрицательная, то меняем роли и делаем сумму положительной
-                new_amount = -new_amount
-                self.cursor.execute("UPDATE debts SET amount = ?, creditor_id = ?, debtor_id = ? WHERE debt_id = ?", (new_amount, debtor_id, creditor_id, debt_id))
+                if new_amount < 0:
+                    new_amount = -new_amount
+                    debtor_id = current_creditor_id
+                else:
+                    debtor_id = creditor_id
+                    creditor_id = current_creditor_id
+
+            if abs(new_amount) > self.epsilon:
+                self.cursor.execute("UPDATE debts SET amount = ?, creditor_id = ?, debtor_id = ?, currency = ? WHERE debt_id = ?", (round(new_amount, 3), creditor_id, debtor_id, currency, debt_id))
             else:
-                # Удаляем запись если долг точно погашен
                 self.cursor.execute("DELETE FROM debts WHERE debt_id = ?", (debt_id,))
         else:
-            # Добавление новой записи в случае если подходящая пара не найдена
             self.cursor.execute("INSERT INTO debts (creditor_id, debtor_id, amount, currency, description, date, chat_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (creditor_id, debtor_id, amount, currency, description, datetime.datetime.now(tz=datetime.timezone.utc), chat_id))
+                (creditor_id, debtor_id, round(amount, 3), currency, description, datetime.datetime.now(tz=datetime.timezone.utc), chat_id))
         self.connection.commit()
 
     def get_user_contact_info(self, chat_id, user_id):
@@ -147,7 +155,7 @@ class Database():
         self.connection.commit()
 
     def update_debt(self, debt_id, new_debt_amount):
-        self.cursor.execute("UPDATE debts SET amount = ? WHERE debt_id = ?", (new_debt_amount, debt_id))
+        self.cursor.execute("UPDATE debts SET amount = ? WHERE debt_id = ?", (round(new_debt_amount, 3), debt_id))
         self.connection.commit()
 
     def get_debts_by_currency(self, chat_id, debtor_id, creditor_id, currency):

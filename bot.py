@@ -1,15 +1,17 @@
-import datetime
+import os
 
 from aiogram import Bot, types
 from aiogram.contrib.fsm_storage.files import JSONStorage
 from aiogram.contrib.middlewares.logging import LoggingMiddleware
-from aiogram.dispatcher import Dispatcher, FSMContext, filters
+from aiogram.dispatcher import Dispatcher, FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.utils import executor, markdown as md
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from tech import Database, texts, get_exchange_rate, CURRENCY_EXCHANGE_OPTIONS
 
+
+BOT_API_TOKEN = os.environ.get('BOT_API_TOKEN')
 
 bot = Bot(token=BOT_API_TOKEN, parse_mode="MarkdownV2")
 storage = JSONStorage('./storage.json')
@@ -111,7 +113,11 @@ async def ping_command(message: types.Message, state: FSMContext) -> None:
             try:
                 debts = db.get_debts_for_pair(message.chat.id, message.from_user.id, user_id)
 
-                text = md.escape_md(f"Ты должен {message.from_user.full_name}:\n")
+                if len(debts) == 0:
+                    text = md.escape_md(f"Ты ничего не должен {message.from_user.full_name}, хз зачем тебя пинганули красавчик")
+                else:
+                    text = md.escape_md(f"Ты должен {message.from_user.full_name}:\n")
+
                 for debt in debts:
                     text += md.escape_md(f"{debt[3]} {debt[4]}\n")
 
@@ -135,6 +141,11 @@ async def expense_command(message: types.Message, state: FSMContext) -> None:
         return
 
     amount, currency, description = args
+
+    if currency not in CURRENCY_EXCHANGE_OPTIONS:
+        await message.reply(md.escape_md("Извините, пока что доступны только валюты: {}".format(', '.join(CURRENCY_EXCHANGE_OPTIONS))))
+        return
+
     await state.update_data(amount=float(amount), currency=currency, description=description, chat_id=message.chat.id, selected_users=[])
 
     users = db.get_users_in_chat(message.chat.id)
@@ -159,7 +170,6 @@ async def add_user_to_list(callback_query: types.CallbackQuery, state: FSMContex
     users = db.get_users_in_chat(data['chat_id'])
     keyboard = InlineKeyboardMarkup(row_width=2)
 
-    # Обновляем список выбранных пользователей
     if user_id not in selected_users:
         selected_users.append(user_id)
     else:
@@ -167,7 +177,6 @@ async def add_user_to_list(callback_query: types.CallbackQuery, state: FSMContex
 
     await state.update_data(selected_users=selected_users)
 
-    # Обновляем текст кнопок
     for user in users:
         status = "✓ " if user[0] in selected_users else ""
         username_button = f"{status}{user[1]}"
@@ -192,11 +201,11 @@ async def process_equal_division(callback_query: types.CallbackQuery, state: FSM
 
     amount_per_user = data['amount'] / len(users)
     for user_id in users:
-        db.update_or_add_debt(
+        await db.update_or_add_debt(
             creditor_id=callback_query.from_user.id, debtor_id=user_id, amount=amount_per_user,
             currency=data['currency'], description=data['description'], chat_id=data['chat_id']
         )
-    
+
     await callback_query.message.reply(md.escape_md("Долги обновлены и поровну разделены."))
     await state.finish()
 
@@ -268,7 +277,7 @@ async def my_debts_command(message: types.Message, state: FSMContext) -> None:
         response += md.escape_md(f"Пользователю {creditor} должен {debt[3]} {debt[4]}\n")
 
     keyboard = InlineKeyboardMarkup()
-    # Эта кнопка запускает процесс выбора валюты
+
     convert_button = InlineKeyboardButton("Привести к одной валюте", callback_data="choose_currency")
     keyboard.add(convert_button)
 
@@ -442,7 +451,7 @@ async def convert_debts_for_payment(callback_query: types.CallbackQuery, state: 
 @dp.callback_query_handler(text_contains="initiate_payment", state="*")
 async def initiate_payment_process(callback_query: types.CallbackQuery, state: FSMContext):
     await callback_query.answer()
-    # Исправленный способ установки состояния:
+
     await state.set_state(DebtPaymentStates.awaiting_payment)
     await callback_query.message.reply("Введите сумму и валюту платежа в формате: 100 USD")
 
@@ -459,7 +468,7 @@ async def process_payment_logic(message, amount_paid, currency_paid, state):
     remaining_amount = amount_paid
 
     for debt in specific_debts:
-        if remaining_amount <= 0:
+        if remaining_amount <= db.epsilon:
             break
         if remaining_amount >= debt[1]:
             remaining_amount -= debt[1]
@@ -473,7 +482,7 @@ async def process_payment_logic(message, amount_paid, currency_paid, state):
         # debt_id, amount, currency, date
 
         for debt in other_debts:
-            if remaining_amount <= 0:
+            if remaining_amount <= db.epsilon:
                 break
             try:
                 converted_amount = await get_exchange_rate(debt[2], currency_paid, debt[1], debt[3])
@@ -504,7 +513,6 @@ async def handle_payment_entry(message: types.Message, state: FSMContext):
         await message.reply(md.escape_md("Неверный формат. Пожалуйста, введите сумму и валюту в формате: amount currency"))
         return
 
-    # Логика обновления долгов, регистрация платежа и обновление остатков
     await process_payment_logic(message, amount_paid, currency_paid, state)
     await state.finish()
 
