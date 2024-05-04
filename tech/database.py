@@ -47,11 +47,20 @@ class Database():
             "FOREIGN KEY (chat_id) REFERENCES chats (chat_id));"
         )
 
-    def register_chat(self, message):
+    def register_chat(self, chat_id):
         self.connection.execute(
             "INSERT OR IGNORE INTO chats (chat_id) VALUES (?)",
-            (message.chat.id,)
+            (chat_id,)
         )
+        self.connection.commit()
+
+    def get_chat_lang(self, chat_id):
+        self.cursor.execute("SELECT language FROM chats WHERE chat_id = ?", (chat_id,))
+        result = self.cursor.fetchone()
+        return result[0] if result else None
+    
+    def update_chat_lang(self, chat_id, lang):
+        self.cursor.execute("UPDATE chats SET language = ? WHERE chat_id = ?", (lang, chat_id,))
         self.connection.commit()
 
     def register_user(self, message, phone, bank):
